@@ -66,9 +66,9 @@
 #endif
 
 // CHANGE THIS TO BE YOUR PROJECT'S STUFF
-const std::string OSProject = "WireOS";
-const std::string Creator = "By Wire/kercre123";
-const std::string CreatorWebsite = "kerigan.dev";
+const std::string OSProject = "Girl OS";
+const std::string Creator = "By MetalDEV";
+const std::string CreatorWebsite = "example.com";
 
 // Log options
 #define LOG_CHANNEL    "FaceInfoScreenManager"
@@ -222,9 +222,9 @@ void FaceInfoScreenManager::Init(Anim::AnimContext* context, Anim::AnimationStre
   ADD_SCREEN(FAC, None);
   ADD_SCREEN(CustomText, None);
   ADD_SCREEN(Main, Network);
-  ADD_SCREEN_WITH_TEXT(ClearUserData, Main, {"CLEAR OUT SOUL?"});
-  ADD_SCREEN_WITH_TEXT(ClearUserDataFail, Main, {"UNABLE TO CLEAR SOUL"});
-  ADD_SCREEN_WITH_TEXT(Rebooting, Rebooting, {"Vector will remember that..."});
+  ADD_SCREEN_WITH_TEXT(ClearUserData, Main, {"BECOME BOY"});
+  ADD_SCREEN_WITH_TEXT(ClearUserDataFail, Main, {"YOUR GAL REFUSED"});
+  ADD_SCREEN_WITH_TEXT(Rebooting, Rebooting, {"You have a boy again"});
   ADD_SCREEN_WITH_TEXT(SelfTest, Main, {"START SELF TEST?"});
   ADD_SCREEN(SelfTestRunning, SelfTestRunning)
   ADD_SCREEN(Network, SensorInfo);
