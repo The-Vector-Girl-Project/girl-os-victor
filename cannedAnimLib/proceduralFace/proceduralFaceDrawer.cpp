@@ -43,16 +43,28 @@ namespace Vector {
   CONSOLE_VAR_RANGED(s32,   kProcFace_EllipseDelta,               CONSOLE_GROUP, IsXray() ? 15 : 10, 1, 90);
   CONSOLE_VAR_RANGED(f32,   kProcFace_EyeLightnessMultiplier,     CONSOLE_GROUP, 1.f, 0.f, 2.f);
 
-  CONSOLE_VAR(bool,         kProcFace_HotspotRender,              CONSOLE_GROUP, false); // Render glow
+  CONSOLE_VAR(bool,         kProcFace_HotspotRender,              CONSOLE_GROUP, true); // Render glow
   CONSOLE_VAR_RANGED(f32,   kProcFace_HotspotFalloff,             CONSOLE_GROUP, 0.48f, 0.05f, 1.f);
+
+  // Outer pupil color (RGB, 0–255)
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilOuterColorR, CONSOLE_GROUP, 255,   0, 255);
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilOuterColorG, CONSOLE_GROUP, 95,   0, 255);
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilOuterColorB, CONSOLE_GROUP, 255,   0, 255);
+
+  // Inner pupil color (RGB, 0–255)
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilInnerColorR, CONSOLE_GROUP, 0, 0, 255);
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilInnerColorG, CONSOLE_GROUP, 0, 0, 255);
+  CONSOLE_VAR_RANGED(s32, kProcFace_PupilInnerColorB, CONSOLE_GROUP, 0, 0, 255);
  
-  CONSOLE_VAR(bool,         kProcFace_EnableAntiAliasing,         CONSOLE_GROUP, false);
+  CONSOLE_VAR(bool,         kProcFace_EnableAntiAliasing,         CONSOLE_GROUP, true);
+  CONSOLE_VAR(bool,         kProcFace_EnableOutline,                 CONSOLE_GROUP, true);
+  CONSOLE_VAR_RANGED(s32,          kProcFace_OutlineWidth,                  CONSOLE_GROUP, 5,1,10);
   CONSOLE_VAR_RANGED(s32,   kProcFace_AntiAliasingSize,           CONSOLE_GROUP, 3, 0, 15); // full image antialiasing (3 will use NEON)
   CONSOLE_VAR_ENUM(uint8_t, kProcFace_AntiAliasingFilter,         CONSOLE_GROUP, (uint8_t)Filter::BoxFilter, "None,Box,Gaussian");
   CONSOLE_VAR_RANGED(f32,   kProcFace_AntiAliasingSigmaFraction,  CONSOLE_GROUP, 0.5f, 0.0f, 1.0f);
   CONSOLE_VAR(bool, kProcFace_CustomEyes, CONSOLE_GROUP, true);
-  CONSOLE_VAR_RANGED(f32, kProcFace_CustomEyeOpacity, CONSOLE_GROUP, 1.f, 0.f, 1.f);
-  CONSOLE_VAR_ENUM(u8, kProcFace_FlavorOfGay, CONSOLE_GROUP, 3, "Lesbian,Gay,Bi,Trans,Pan,Frog,All,Galaxy,Custom");
+  CONSOLE_VAR_RANGED(f32, kProcFace_CustomEyeOpacity, CONSOLE_GROUP, 0.f, 0.f, 1.f);
+  CONSOLE_VAR_ENUM(u8, kProcFace_FlavorOfGay, CONSOLE_GROUP, 0, "Lesbian,Gay,Bi,Trans,Pan,Frog,All,Galaxy,Custom");
   static void LOOK_LoadFaceOverlay(ConsoleFunctionContextRef context)
   {
     ProceduralFaceDrawer::LoadCustomEyePNG();
@@ -1028,8 +1040,6 @@ bool ProceduralFaceDrawer::ApplyCustomOverlay(const ProceduralFace& faceData,
     int xMax0 = _faceColMax + padX;
     int yMin0 = _faceRowMin;
     int yMax0 = _faceRowMax;
-    int fullW = xMax0 - xMin0 + 1;
-    int fullH = yMax0 - yMin0 + 1;
 
     int xMin = std::max(0, xMin0);
     int xMax = std::min(ProceduralFace::WIDTH - 1, xMax0);
@@ -1039,64 +1049,237 @@ bool ProceduralFaceDrawer::ApplyCustomOverlay(const ProceduralFace& faceData,
                         xMax - xMin + 1,
                         yMax - yMin + 1);
 
-    auto dstROI  = output.GetROI(roiR);
+    auto dstROI = output.GetROI(roiR);
     auto maskROI = _faceCache.img8[_faceCache.finalFace].GetROI(roiR);
 
     int overlayW = _customEyeOverlay.GetNumCols();
-    int overlayH = _customEyeOverlay.GetNumRows();
-    float scaleX = overlayW / float(fullW);
-    float scaleY = overlayH / float(fullH);
+int overlayH = _customEyeOverlay.GetNumRows();
 
-    for(int y = 0; y < roiR.GetHeight(); ++y) {
-      auto* dstRow  = dstROI .GetRow(y);
-      auto* maskRow = maskROI.GetRow(y);
-      int globalY    = yMin + y;
-      int sampleY    = std::min(overlayH - 1, std::max(0, int((globalY - yMin0) * scaleY)));
-      for(int x = 0; x < roiR.GetWidth(); ++x) {
-        if(maskRow[x] == 0) continue;
-        int globalX = xMin + x;
-        int sampleX = std::min(overlayW - 1, std::max(0, int((globalX - xMin0) * scaleX)));
-        u8 alpha = _customEyeAlpha.GetRow(sampleY)[sampleX];
-        if(alpha == 0) continue;
+const int roiW = roiR.GetWidth();
+const int roiH = roiR.GetHeight();
+if (roiW <= 0 || roiH <= 0) {
 
-        // unpack d
-        u16 destVal = dstRow[x].GetValue();
-        u8 dR = (destVal >> 11) & 0x1F;
-        u8 dG = (destVal >> 5)  & 0x3F;
-        u8 dB =  destVal        & 0x1F;
-        u8 D_R = (dR << 3) | (dR >> 2);
-        u8 D_G = (dG << 2) | (dG >> 4);
-        u8 D_B = (dB << 3) | (dB >> 2);
+  return dirty;
+}
+static cv::Mat s_overlayRgbNative; // CV_8UC3 BGR
+static int s_overlayW = 0, s_overlayH = 0;
+if (s_overlayRgbNative.empty() || s_overlayW != overlayW || s_overlayH != overlayH) {
+  s_overlayW = overlayW;
+  s_overlayH = overlayH;
+  s_overlayRgbNative = cv::Mat(overlayH, overlayW, CV_8UC3);
+  for (int r=0; r<overlayH; ++r) {
+    auto* dstPtr = s_overlayRgbNative.ptr<cv::Vec3b>(r);
+    for (int c=0; c<overlayW; ++c) {
+      const u16 val = _customEyeOverlay.GetRow(r)[c].GetValue();
+      // unpack RGB565 -> 8-bit
+      const uint8_t r5 = (val >> 11) & 0x1F;
+      const uint8_t g6 = (val >> 5) & 0x3F;
+      const uint8_t b5 = (val) & 0x1F;
+      const uint8_t R8 = (r5 << 3) | (r5 >> 2);
+      const uint8_t G8 = (g6 << 2) | (g6 >> 4);
+      const uint8_t B8 = (b5 << 3) | (b5 >> 2);
+      dstPtr[c] = cv::Vec3b(B8, G8, R8); // BGR ordering
+    }
+  }
+}
+static cv::Size s_prevResizedSize(0,0);
+static cv::Mat  s_cachedOverlayResized; // CV_8UC3, size == roi
+if (s_cachedOverlayResized.empty() || s_prevResizedSize != cv::Size(roiW, roiH)) {
+  cv::resize(s_overlayRgbNative, s_cachedOverlayResized, cv::Size(roiW, roiH), 0, 0, cv::INTER_LINEAR);
+  s_prevResizedSize = cv::Size(roiW, roiH);
+}
 
-        // overlay
-        u16 oVal = _customEyeOverlay.GetRow(sampleY)[sampleX].GetValue();
-        u8 oR = (oVal >> 11) & 0x1F;
-        u8 oG = (oVal >> 5)  & 0x3F;
-        u8 oB =  oVal        & 0x1F;
-        u8 O_R = (oR << 3) | (oR >> 2);
-        u8 O_G = (oG << 2) | (oG >> 4);
-        u8 O_B = (oB << 3) | (oB >> 2);
 
-        // modulate by d intensity
-        u8 dV = std::max({D_R, D_G, D_B});
-        O_R = O_R * dV / 255;
-        O_G = O_G * dV / 255;
-        O_B = O_B * dV / 255;
+cv::Mat alphaNative = _customEyeAlpha.get_CvMat_(); // CV_8U in overlay native size
+static cv::Size s_prevAlphaResizedSize(0,0);
+static cv::Mat  s_cachedAlphaResized; // CV_8U, size == roi
+if (s_cachedAlphaResized.empty() || s_prevAlphaResizedSize != cv::Size(roiW, roiH)) {
+  cv::resize(alphaNative, s_cachedAlphaResized, cv::Size(roiW, roiH), 0, 0, cv::INTER_LINEAR);
+  s_prevAlphaResizedSize = cv::Size(roiW, roiH);
+}
 
-        // alpha blend
-        u8 invA = 255 - alpha;
-        u8 R = (O_R * alpha + D_R * invA) / 255;
-        u8 G = (O_G * alpha + D_G * invA) / 255;
-        u8 B = (O_B * alpha + D_B * invA) / 255;
+const int outlinePx = Util::Clamp(kProcFace_OutlineWidth, 0, std::min(roiW, roiH)/2);
 
-        // pack
-        u16 packed = ((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3);
-        dstRow[x].SetValue(packed);
-      }
+
+float scaleX = (roiW > 2*outlinePx) ? float(roiW - 2*outlinePx) / float(roiW) : 0.f;
+float scaleY = (roiH > 2*outlinePx) ? float(roiH - 2*outlinePx) / float(roiH) : 0.f;
+
+float scale = std::min(scaleX, scaleY);
+if (scale <= 0.f) {
+
+  return dirty;
+}
+
+int smallW = std::max(1, (int)std::round(roiW * scale));
+int smallH = std::max(1, (int)std::round(roiH * scale));
+
+
+cv::Mat overlaySmall, alphaSmall;
+cv::resize(s_cachedOverlayResized, overlaySmall, cv::Size(smallW, smallH), 0, 0, cv::INTER_LINEAR);
+cv::resize(s_cachedAlphaResized, alphaSmall, cv::Size(smallW, smallH), 0, 0, cv::INTER_LINEAR);
+
+
+const int offX = (roiW - smallW) / 2;
+const int offY = (roiH - smallH) / 2;
+
+
+for (int y = 0; y < roiH; ++y) {
+  auto* dstRow = dstROI.GetRow(y);
+  auto* maskRow = maskROI.GetRow(y);
+  const int sy = y - offY;
+  const bool inSmallY = (sy >= 0 && sy < smallH);
+  const uchar* alphaSmallRow = inSmallY ? alphaSmall.ptr<uchar>(sy) : nullptr;
+  const cv::Vec3b* overlaySmallRow = inSmallY ? overlaySmall.ptr<cv::Vec3b>(sy) : nullptr;
+
+  for (int x = 0; x < roiW; ++x) {
+    if (maskRow[x] == 0) continue;
+
+    const int sx = x - offX;
+    if (!(inSmallY && sx >= 0 && sx < smallW)) {
+      continue;
     }
 
-    dirty = true;
+    const u8 alpha = alphaSmallRow[sx]; // 0..255
+    if (alpha == 0) continue;
+
+    u16 destVal = dstRow[x].GetValue();
+    u8 dR = (destVal >> 11) & 0x1F;
+    u8 dG = (destVal >> 5)  & 0x3F;
+    u8 dB =  destVal        & 0x1F;
+    u8 D_R = (dR << 3) | (dR >> 2);
+    u8 D_G = (dG << 2) | (dG >> 4);
+    u8 D_B = (dB << 3) | (dB >> 2);
+
+    const cv::Vec3b &bgr = overlaySmallRow[sx];
+    u8 O_B = bgr[0];
+    u8 O_G = bgr[1];
+    u8 O_R = bgr[2];
+
+    u8 dV = std::max({D_R, D_G, D_B});
+    O_R = (O_R * dV) / 255;
+    O_G = (O_G * dV) / 255;
+    O_B = (O_B * dV) / 255;
+
+    u8 invA = 255 - alpha;
+    u8 R = (O_R * alpha + D_R * invA) / 255;
+    u8 G = (O_G * alpha + D_G * invA) / 255;
+    u8 B = (O_B * alpha + D_B * invA) / 255;
+
+    u16 packed = static_cast<u16>(((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3));
+    dstRow[x].SetValue(packed);
   }
+}
+{
+
+  // Outer pupil color
+  uint8_t OR = kProcFace_PupilOuterColorR;
+  uint8_t OG = kProcFace_PupilOuterColorG;
+  uint8_t OB = kProcFace_PupilOuterColorB;
+
+  // Inner pupil color
+  uint8_t IR = kProcFace_PupilInnerColorR;
+  uint8_t IG = kProcFace_PupilInnerColorG;
+  uint8_t IB = kProcFace_PupilInnerColorB;
+
+  auto pack565 = [&](uint8_t r, uint8_t g, uint8_t b) -> uint16_t {
+    return uint16_t(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+  };
+
+  const uint16_t outerColor565 = pack565(OR, OG, OB);
+  const uint16_t innerColor565 = pack565(IR, IG, IB);
+  const uint16_t shineColor565 = pack565(255,255,255);
+
+  bool hasFaceTransform = (!Util::IsNearZero(faceData.GetFaceAngle()) ||
+                           !(faceData.GetFacePosition() == 0) ||
+                           !(faceData.GetFaceScale() == 1.f));
+
+  Matrix_3x3f W_face;
+  const Matrix_3x3f* W_facePtr = nullptr;
+
+  if (hasFaceTransform) {
+    W_face = GetTransformationMatrix(faceData.GetFaceAngle(),
+                                     faceData.GetFaceScale().x(),
+                                     faceData.GetFaceScale().y(),
+                                     faceData.GetFacePosition().x(),
+                                     faceData.GetFacePosition().y(),
+                                     ProceduralFace::WIDTH * 0.5f,
+                                     ProceduralFace::HEIGHT * 0.5f);
+    W_facePtr = &W_face;
+  }
+
+  const s32 nominalEyeW = ProceduralFace::NominalEyeWidth;
+  const s32 nominalEyeH = ProceduralFace::NominalEyeHeight;
+
+  for (auto whichEye : { WhichEye::Left, WhichEye::Right }) {
+
+    Point<2, Value> eyeCenter = (whichEye == WhichEye::Left)
+                                ? Point<2, Value>(ProceduralFace::GetNominalLeftEyeX(), ProceduralFace::GetNominalEyeY())
+                                : Point<2, Value>(ProceduralFace::GetNominalRightEyeX(), ProceduralFace::GetNominalEyeY());
+
+    eyeCenter.x() += faceData.GetParameter(whichEye, Parameter::EyeCenterX);
+    eyeCenter.y() += faceData.GetParameter(whichEye, Parameter::EyeCenterY);
+
+    Matrix_3x3f W_eye = GetTransformationMatrix(
+        faceData.GetParameter(whichEye, Parameter::EyeAngle),
+        faceData.GetParameter(whichEye, Parameter::EyeScaleX),
+        faceData.GetParameter(whichEye, Parameter::EyeScaleY),
+        eyeCenter.x(),
+        eyeCenter.y()
+    );
+
+    Matrix_3x3f W_total = W_eye;
+    if (W_facePtr) { W_total = (*W_facePtr) * W_eye; }
+
+    const f32 hotX = 0.5f * nominalEyeW * faceData.GetParameter(whichEye, Parameter::HotSpotCenterX);
+    const f32 hotY = 0.5f * nominalEyeH * faceData.GetParameter(whichEye, Parameter::HotSpotCenterY);
+
+    Point<2, f32> hotGlobal = W_total * Point3f(hotX, hotY, 1.f);
+
+    int cx = int(ROUND(hotGlobal.x())) - roiR.GetX();
+    int cy = int(ROUND(hotGlobal.y())) - roiR.GetY();
+
+    if (cx < 0 || cx >= roiW || cy < 0 || cy >= roiH) continue;
+
+    float avgScale = 1.2f * (faceData.GetParameter(whichEye, Parameter::EyeScaleX) +
+                             faceData.GetParameter(whichEye, Parameter::EyeScaleY));
+
+    int outerR = std::max(1, int((0.23f * nominalEyeW * avgScale)));
+    int innerR = std::max(1, int(outerR * 0.45f));  // inner is smaller
+
+    outerR = Util::Clamp(outerR, 1, std::min(roiW, roiH) / 3);
+    innerR = Util::Clamp(innerR, 1, outerR - 1);
+
+    auto drawCircle = [&](int centerX, int centerY, int radius, uint16_t color) {
+      int r2 = radius * radius;
+      int y0 = std::max(0, centerY - radius);
+      int y1 = std::min(roiH - 1, centerY + radius);
+    
+      for (int y = y0; y <= y1; ++y) {
+        int dy = y - centerY;
+        int maxDx = int(std::floor(std::sqrt(float(std::max(0, r2 - dy * dy)))));
+        int x0 = std::max(0, centerX - maxDx);
+        int x1 = std::min(roiW - 1, centerX + maxDx);
+      
+        auto* dstRow = dstROI.GetRow(y);
+        auto* maskRow = maskROI.GetRow(y);
+      
+        for (int x = x0; x <= x1; ++x) {
+          if (maskRow[x] == 0) continue;  // respect eye mask
+          dstRow[x].SetValue(color);
+        }
+      }
+    };
+
+    drawCircle(cx, cy, outerR, outerColor565);
+    drawCircle(cx, cy, innerR, innerColor565);
+    drawCircle(cx + 10, cy-10, innerR/3, shineColor565);
+    drawCircle(cx - 10, cy+10, innerR/2, shineColor565);
+  }
+}
+
+dirty = true;
+  }
+
   return dirty;
 }
 
