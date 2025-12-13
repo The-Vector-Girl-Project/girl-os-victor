@@ -74,7 +74,7 @@ namespace Vector {
 
 #if PROCEDURALFACE_GLOW_FEATURE
   CONSOLE_VAR_RANGED(f32, kProcFace_GlowSizeMultiplier,           CONSOLE_GROUP, 1.f, 0.f, 1.f);
-  CONSOLE_VAR_RANGED(f32, kProcFace_GlowLightnessMultiplier,      CONSOLE_GROUP, 1.f, 0.f, 10.f);
+  CONSOLE_VAR_RANGED(f32, kProcFace_GlowLightnessMultiplier,      CONSOLE_GROUP, 0.01f, 0.f, 10.f);
   CONSOLE_VAR_ENUM(uint8_t, kProcFace_GlowFilter,                 CONSOLE_GROUP, (uint8_t)Filter::BoxFilter, "None,Box,Gaussian,Box (NEON code; size 3)");
 #endif
 
@@ -1270,6 +1270,191 @@ for (int y = 0; y < roiH; ++y) {
       }
     };
 
+    // ---------- Thick line draw lambda (ROI coords, respects mask) ----------
+    auto drawThickLine = [&](int x1, int y1, int x2, int y2, int thickness, uint16_t color) {
+      // radius in pixels
+      const double r = std::max(0.5, thickness * 0.5); // ensure >= 0.5
+      const double r2 = r * r;
+    
+      // bounding box for the line expanded by radius
+      int bx0 = std::max(0, (int)std::floor(std::min(x1,x2) - r));
+      int bx1 = std::min(roiW - 1, (int)std::ceil (std::max(x1,x2) + r));
+      int by0 = std::max(0, (int)std::floor(std::min(y1,y2) - r));
+      int by1 = std::min(roiH - 1, (int)std::ceil (std::max(y1,y2) + r));
+    
+      const double vx = double(x2 - x1);
+      const double vy = double(y2 - y1);
+      const double segLen2 = vx*vx + vy*vy;
+    
+      for (int yy = by0; yy <= by1; ++yy) {
+        auto* dstRow = dstROI.GetRow(yy);
+        auto* maskRow = maskROI.GetRow(yy);
+      
+        for (int xx = bx0; xx <= bx1; ++xx) {
+          if (maskRow[xx] == 0) continue; // respect eye mask
+        
+          // compute squared distance from pixel center (xx,yy) to segment (x1,y1)-(x2,y2)
+          const double wx = double(xx - x1);
+          const double wy = double(yy - y1);
+          double projT;
+          if (segLen2 <= 1e-6) {
+            projT = 0.0; // degenerate segment -> distance to endpoint
+          } else {
+            projT = (wx * vx + wy * vy) / segLen2;
+            if (projT < 0.0) projT = 0.0;
+            else if (projT > 1.0) projT = 1.0;
+          }
+          const double projX = double(x1) + projT * vx;
+          const double projY = double(y1) + projT * vy;
+          const double dx = double(xx) - projX;
+          const double dy = double(yy) - projY;
+          const double dist2 = dx*dx + dy*dy;
+        
+          if (dist2 <= r2) {
+            dstRow[xx].SetValue(color);
+          }
+        }
+      }
+    };
+
+    const int lashesSpacingPx = 8;                         // min distance between lash origins (px)
+const int lashLengthPxBase = std::max(2, kProcFace_OutlineWidth*2); // base lash length (px)
+const int lashThickness = 2;                           // thickness in pixels
+const uint16_t lashColor = outerColor565;              // use outer pupil color (or hardcode black)
+
+// Precompute face-level transform if present (same as elsewhere)
+bool hasFaceTransform = (!Util::IsNearZero(faceData.GetFaceAngle()) ||
+                         !(faceData.GetFacePosition() == 0) ||
+                         !(faceData.GetFaceScale() == 1.f));
+Matrix_3x3f W_face;
+const Matrix_3x3f* W_facePtr = nullptr;
+if (hasFaceTransform) {
+  W_face = GetTransformationMatrix(faceData.GetFaceAngle(),
+                                   faceData.GetFaceScale().x(),
+                                   faceData.GetFaceScale().y(),
+                                   faceData.GetFacePosition().x(),
+                                   faceData.GetFacePosition().y(),
+                                   static_cast<f32>(ProceduralFace::WIDTH)*0.5f,
+                                   static_cast<f32>(ProceduralFace::HEIGHT)*0.5f);
+  W_facePtr = &W_face;
+}
+
+// helper to compute global eye center and bbox width (in global pixels)
+auto getEyeCenterAndWidth = [&](WhichEye whichEye, Point2f &outCenterROI, float &outEyeWidth) {
+  Point<2, Value> eyeCenterNom = (whichEye == WhichEye::Left) ?
+                                 Point<2, Value>(ProceduralFace::GetNominalLeftEyeX(), ProceduralFace::GetNominalEyeY()) :
+                                 Point<2, Value>(ProceduralFace::GetNominalRightEyeX(), ProceduralFace::GetNominalEyeY());
+  eyeCenterNom.x() += faceData.GetParameter(whichEye, Parameter::EyeCenterX);
+  eyeCenterNom.y() += faceData.GetParameter(whichEye, Parameter::EyeCenterY);
+
+  // Eye transform (same as DrawEye)
+  Matrix_3x3f W_eye = GetTransformationMatrix(faceData.GetParameter(whichEye, Parameter::EyeAngle),
+                                              faceData.GetParameter(whichEye, Parameter::EyeScaleX),
+                                              faceData.GetParameter(whichEye, Parameter::EyeScaleY),
+                                              eyeCenterNom.x(),
+                                              eyeCenterNom.y());
+  Matrix_3x3f W_total = W_eye;
+  if (W_facePtr) {
+    W_total = (*W_facePtr) * W_eye;
+  }
+
+  // transformed eye center is the translation elements of W_total
+  const float centerGlobalX = W_total(0,2);
+  const float centerGlobalY = W_total(1,2);
+
+  // Convert to ROI-local coords
+  outCenterROI.x() = centerGlobalX - roiR.GetX();
+  outCenterROI.y() = centerGlobalY - roiR.GetY();
+
+  // estimate eye width from stored bounding boxes
+  const Rectangle<f32>& bbox = (whichEye == WhichEye::Left) ? _leftBBox : _rightBBox;
+  outEyeWidth = bbox.GetXmax() - bbox.GetX(); // global pixel width
+};
+
+// Build a simple mask array accessors for quicker checks
+// maskROI.GetRow(y) returns u8* where nonzero = inside eye
+// We'll iterate boundary pixels and pick those on outer side.
+
+for (auto whichEye : { WhichEye::Left, WhichEye::Right }) {
+  // compute center and eye width
+  Point2f centerROI;
+  float eyeWidthGlobal = 0.f;
+  getEyeCenterAndWidth(whichEye, centerROI, eyeWidthGlobal);
+
+  // quick guard
+  if (centerROI.x() < -50 || centerROI.x() > roiW + 50 ||
+      centerROI.y() < -50 || centerROI.y() > roiH + 50) {
+    continue;
+  }
+
+  // boundary detection + collection
+  std::vector<Point<2,int>> boundaryPts;
+
+  for (int yy = 1; yy < roiH-1; ++yy) {
+    u8* row = maskROI.GetRow(yy);
+    for (int xx = 1; xx < roiW-1; ++xx) {
+      if (row[xx] == 0) continue;
+      // 4-neighbor check for boundary
+      u8* rowm = maskROI.GetRow(yy-1);
+      u8* rowp = maskROI.GetRow(yy+1);
+      if (row[xx-1] == 0 || row[xx+1] == 0 || rowm[xx] == 0 || rowp[xx] == 0) {
+        boundaryPts.emplace_back(xx, yy);
+      }
+    }
+  }
+
+  if (boundaryPts.empty()) continue;
+
+  // choose outer-side points: for left eye pick pts with dx < -0.25*eyeWidth, right eye dx > 0.25*eyeWidth
+  const float sideThreshold = 0.25f * eyeWidthGlobal; // in global pixels
+std::vector<Point<2,int>> sidePts;
+
+  for (auto &p : boundaryPts) {
+    const float dx = float(p.x()) - centerROI.x(); // ROI coords
+    // convert threshold to ROI coords (same since width unaffected by origin)
+    if (whichEye == WhichEye::Left) {
+      if (dx < -sideThreshold) sidePts.push_back(p);
+    } else {
+      if (dx > sideThreshold) sidePts.push_back(p);
+    }
+  }
+
+  if (sidePts.empty()) continue;
+
+  // spacing suppression: draw only if > lashesSpacingPx from prior chosen origin
+std::vector<Point<2,int>> chosen;
+  for (auto &p : sidePts) {
+    bool tooClose = false;
+    for (auto &q : chosen) {
+      int ddx = p.x() - q.x();
+      int ddy = p.y() - q.y();
+      if ((ddx*ddx + ddy*ddy) < (lashesSpacingPx * lashesSpacingPx)) { tooClose = true; break; }
+    }
+    if (!tooClose) chosen.push_back(p);
+  }
+
+  // For each chosen border point draw a short lash outward
+  for (auto &bp : chosen) {
+    const float vx = float(bp.x()) - centerROI.x();
+    const float vy = float(bp.y()) - centerROI.y();
+    const float len = std::hypot(vx, vy);
+    if (len < 1e-3f) continue;
+    const float nx = vx / len;
+    const float ny = vy / len;
+
+    // lash length scales with eye size and base factor
+    int lashLength = Util::Clamp<int>( (int)std::round(lashLengthPxBase * (eyeWidthGlobal / (float)ProceduralFace::NominalEyeWidth)), 1, 40);
+
+    // start at border pixel center, end outward
+    int sx = bp.x();
+    int sy = bp.y();
+    int ex = Util::Clamp<int>( (int)std::round(sx + nx * lashLength), 0, roiW-1 );
+    int ey = Util::Clamp<int>( (int)std::round(sy + ny * lashLength), 0, roiH-1 );
+
+    // Draw line using existing drawThickLine lambda
+    drawThickLine(sx, sy, ex, ey, lashThickness, lashColor);
+  }
+}
     drawCircle(cx, cy, outerR, outerColor565);
     drawCircle(cx, cy, innerR, innerColor565);
     drawCircle(cx + 10, cy-10, innerR/3, shineColor565);
