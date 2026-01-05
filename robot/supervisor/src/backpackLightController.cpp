@@ -17,6 +17,7 @@
 #include "anki/cozmo/robot/logging.h"
 #include "anki/cozmo/robot/hal.h"
 #include "anki/cozmo/robot/ledController.h"
+#include "engine/components/lightsConfig.h"
 
 #include <string.h>
 #include "clad/robotInterface/messageEngineToRobot.h"
@@ -110,15 +111,19 @@ namespace BackpackLightController {
     for(u8 i = 0; i < (u8)LEDId::NUM_BACKPACK_LEDS; i++)
     {
       u32 color;
-      if(i == 0) {
-        color = 0x80ff0000; // red for back led
-      } else if(i == 1) {
-        color = 0x8000ff00; // green for middle led
-      } else if(i == 2) {
-        color = 0x800000ff; // blue for top led
+      if (_ankilights()) {
+          color = 0x80808000;
       } else {
-        color = 0x80808000; // fallback color
-      }
+        if(i == 0) {
+          color = 0x80ff0000; // red for back led
+        } else if(i == 1) {
+          color = 0x8000ff00; // green for middle led
+        } else if(i == 2) {
+          color = 0x800000ff; // blue for top led
+        } else {
+          color = 0x80808000; // fallback color
+        }
+      }  
     
       _ledParams[(int)BackpackLightLayer::BPL_USER].lights[i] = {
         .onColor = color,
